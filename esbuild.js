@@ -46,7 +46,8 @@ async function main() {
             'src/extension.ts',
             'src/test/runTest.ts',
             'src/test/suite/index.ts',
-            'src/test/suite/cleaner.test.ts'
+            'src/test/suite/cleaner.test.ts',
+            'src/test/unit/cleaner.test.ts'
         ],
         bundle: true,
         format: 'cjs',

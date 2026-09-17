@@ -1782,87 +1782,157 @@ var vscode3 = __toESM(require("vscode"));
 
 // src/commands.ts
 var vscode2 = __toESM(require("vscode"));
+var path2 = __toESM(require("path"));
 
 // src/config.ts
 var vscode = __toESM(require("vscode"));
-function getConfig() {
-  const config = vscode.workspace.getConfiguration("codeCleaner");
+function getConfig(scope) {
+  const resource = scope && "uri" in scope ? scope.uri : scope;
+  const config = vscode.workspace.getConfiguration("codeCleaner", resource);
   return {
     profile: config.get("profile", "Clean"),
     removeComments: config.get("removeComments", true),
     removeBlankLines: config.get("removeBlankLines", true),
     removeSpacesAroundOperators: config.get("removeSpacesAroundOperators", true),
     removeIndentation: config.get("removeIndentation", false),
-    cleanOnSave: config.get("cleanOnSave", false)
+    cleanOnSave: config.get("cleanOnSave", false),
+    preserveLegalHeaders: config.get("preserveLegalHeaders", true),
+    preserveDocstrings: config.get("preserveDocstrings", false)
   };
 }
 
 // src/core/parser.ts
 var path = __toESM(require("path"));
+var fs2 = __toESM(require("fs"));
 var Parser2 = require_tree_sitter();
-var parser = null;
+var isInitialized = false;
 var languageCache = /* @__PURE__ */ new Map();
-async function getParserForLanguage(languageId) {
-  if (!parser) {
-    await Parser2.init();
-    parser = new Parser2();
+var langMap = {
+  "javascript": "javascript",
+  "javascriptreact": "tsx",
+  "typescript": "typescript",
+  "typescriptreact": "tsx",
+  "python": "python",
+  "java": "java",
+  "c": "c",
+  "cpp": "cpp",
+  "csharp": "c_sharp",
+  "go": "go",
+  "rust": "rust",
+  "php": "php",
+  "ruby": "ruby",
+  "swift": "swift",
+  "kotlin": "kotlin",
+  "dart": "dart",
+  "scala": "scala",
+  "lua": "lua",
+  "yaml": "yaml",
+  "html": "html",
+  "css": "css",
+  "json": "json",
+  "jsonc": "json",
+  "shellscript": "bash",
+  "bash": "bash",
+  "solidity": "solidity",
+  "vue": "vue",
+  "toml": "toml",
+  "zig": "zig",
+  "elixir": "elixir",
+  "elm": "elm",
+  "ocaml": "ocaml",
+  "objective-c": "objc",
+  "objc": "objc",
+  "ql": "ql",
+  "rescript": "rescript"
+};
+function findWasmPath(fileName) {
+  const candidates = [
+    path.join(__dirname, fileName),
+    path.join(__dirname, "..", fileName),
+    path.join(__dirname, "..", "..", fileName),
+    path.join(__dirname, "..", "..", "out", fileName),
+    path.join(__dirname, "..", "..", "node_modules", "web-tree-sitter", fileName),
+    path.join(__dirname, "..", "..", "node_modules", "tree-sitter-wasms", "out", fileName),
+    path.join(__dirname, "..", "..", "..", "node_modules", "web-tree-sitter", fileName),
+    path.join(__dirname, "..", "..", "..", "node_modules", "tree-sitter-wasms", "out", fileName)
+  ];
+  for (const c of candidates) {
+    if (fs2.existsSync(c)) {
+      return c;
+    }
   }
-  const langMap = {
-    "javascript": "javascript",
-    "javascriptreact": "tsx",
-    "typescript": "typescript",
-    "typescriptreact": "tsx",
-    "python": "python",
-    "java": "java",
-    "c": "c",
-    "cpp": "cpp",
-    "csharp": "c_sharp",
-    "go": "go",
-    "rust": "rust",
-    "php": "php",
-    "ruby": "ruby",
-    "swift": "swift",
-    "kotlin": "kotlin",
-    "dart": "dart",
-    "scala": "scala",
-    "lua": "lua",
-    "yaml": "yaml",
-    "html": "html",
-    "css": "css",
-    "json": "json",
-    "jsonc": "json",
-    "shellscript": "bash",
-    "bash": "bash"
-  };
+  return path.join(__dirname, fileName);
+}
+async function initParserEngine() {
+  if (!isInitialized) {
+    await Parser2.init({
+      locateFile(scriptName) {
+        return findWasmPath(scriptName);
+      }
+    });
+    isInitialized = true;
+  }
+}
+async function getNewParser(languageId) {
+  await initParserEngine();
   const wasmName = langMap[languageId];
   if (!wasmName)
     return null;
   if (!languageCache.has(wasmName)) {
     try {
-      let wasmPath = path.join(__dirname, `tree-sitter-${wasmName}.wasm`);
-      if (!require("fs").existsSync(wasmPath)) {
-        wasmPath = path.join(__dirname, "..", "..", "node_modules", "tree-sitter-wasms", "out", `tree-sitter-${wasmName}.wasm`);
+      const wasmPath = findWasmPath(`tree-sitter-${wasmName}.wasm`);
+      if (!fs2.existsSync(wasmPath)) {
+        console.warn(`WASM grammar file not found for ${wasmName} at ${wasmPath}`);
+        return null;
       }
       const lang = await Parser2.Language.load(wasmPath);
       languageCache.set(wasmName, lang);
     } catch (e) {
-      console.error("Failed to load WASM for", wasmName, e);
+      console.error("Failed to load WASM grammar for", wasmName, e);
       return null;
     }
   }
-  parser.setLanguage(languageCache.get(wasmName));
-  return parser;
+  const parserInstance = new Parser2();
+  parserInstance.setLanguage(languageCache.get(wasmName));
+  return parserInstance;
+}
+async function getParserForLanguage(languageId) {
+  return getNewParser(languageId);
 }
 function countErrors(node) {
   let errors = 0;
   function walk2(n) {
     if (n.type === "ERROR" || n.isMissing())
       errors++;
-    for (let i = 0; i < n.childCount; i++)
-      walk2(n.child(i));
+    for (let i = 0; i < n.childCount; i++) {
+      const child = n.child(i);
+      if (child)
+        walk2(child);
+    }
   }
   walk2(node);
   return errors;
+}
+
+// src/core/comment-utils.ts
+function shouldPreserveComment(commentText, options) {
+  if (!options.removeComments || options.profile === "Format") {
+    return true;
+  }
+  if (options.preserveLegalHeaders !== false) {
+    if (/^\/\*!|^\/\/!|@license|@preserve/i.test(commentText)) {
+      return true;
+    }
+    if (/copyright\s+(\(c\)|©|\d{4})|spdx-license-identifier:|all rights reserved/i.test(commentText)) {
+      return true;
+    }
+  }
+  if (options.preserveDocstrings) {
+    if (commentText.startsWith("/**")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // src/core/legacy-cleaner.ts
@@ -2047,12 +2117,12 @@ function processCodeLegacy(text, languageId, options) {
   const protectedTokens = [];
   for (const token of tokens) {
     if (token.type === "comment") {
-      if (options.removeComments && options.profile !== "Format") {
-        continue;
-      } else {
+      if (shouldPreserveComment(token.value, options)) {
         const placeholder = `__PROTECTED_TOKEN_${protectedTokens.length}__`;
         protectedTokens.push(token.value);
         result += placeholder;
+        continue;
+      } else {
         continue;
       }
     }
@@ -3291,10 +3361,10 @@ function parse($TEXT, options) {
     expect(")");
     return exp;
   }
-  function embed_tokens(parser2) {
+  function embed_tokens(parser) {
     return function _embed_tokens_wrapper(...args2) {
       const start2 = S.token;
-      const expr = parser2(...args2);
+      const expr = parser(...args2);
       expr.start = start2;
       expr.end = prev();
       return expr;
@@ -21956,16 +22026,16 @@ function parseAbsoluteUrl(input) {
 }
 function parseFileUrl(input) {
   const match = fileRegex.exec(input);
-  const path2 = match[2];
-  return makeUrl("file:", "", match[1] || "", "", isAbsolutePath(path2) ? path2 : "/" + path2, match[3] || "", match[4] || "");
+  const path3 = match[2];
+  return makeUrl("file:", "", match[1] || "", "", isAbsolutePath(path3) ? path3 : "/" + path3, match[3] || "", match[4] || "");
 }
-function makeUrl(scheme, user, host, port, path2, query, hash) {
+function makeUrl(scheme, user, host, port, path3, query, hash) {
   return {
     scheme,
     user,
     host,
     port,
-    path: path2,
+    path: path3,
     query,
     hash,
     type: 7
@@ -21995,11 +22065,11 @@ function parseUrl(input) {
   url.type = input ? input.startsWith("?") ? 3 : input.startsWith("#") ? 2 : 4 : 1;
   return url;
 }
-function stripPathFilename(path2) {
-  if (path2.endsWith("/.."))
-    return path2;
-  const index = path2.lastIndexOf("/");
-  return path2.slice(0, index + 1);
+function stripPathFilename(path3) {
+  if (path3.endsWith("/.."))
+    return path3;
+  const index = path3.lastIndexOf("/");
+  return path3.slice(0, index + 1);
 }
 function mergePaths(url, base) {
   normalizePath(base, base.type);
@@ -22037,14 +22107,14 @@ function normalizePath(url, type) {
     pieces[pointer++] = piece;
     positive++;
   }
-  let path2 = "";
+  let path3 = "";
   for (let i = 1; i < pointer; i++) {
-    path2 += "/" + pieces[i];
+    path3 += "/" + pieces[i];
   }
-  if (!path2 || addTrailingSlash && !path2.endsWith("/..")) {
-    path2 += "/";
+  if (!path3 || addTrailingSlash && !path3.endsWith("/..")) {
+    path3 += "/";
   }
-  url.path = path2;
+  url.path = path3;
 }
 function resolve(input, base) {
   if (!input && !base)
@@ -22079,13 +22149,13 @@ function resolve(input, base) {
     case 3:
       return queryHash;
     case 4: {
-      const path2 = url.path.slice(1);
-      if (!path2)
+      const path3 = url.path.slice(1);
+      if (!path3)
         return queryHash || ".";
-      if (isRelative(base || input) && !isRelative(path2)) {
-        return "./" + path2 + queryHash;
+      if (isRelative(base || input) && !isRelative(path3)) {
+        return "./" + path3 + queryHash;
       }
-      return path2 + queryHash;
+      return path3 + queryHash;
     }
     case 5:
       return url.path + queryHash;
@@ -22095,11 +22165,11 @@ function resolve(input, base) {
 }
 
 // node_modules/@jridgewell/trace-mapping/dist/trace-mapping.mjs
-function stripFilename(path2) {
-  if (!path2)
+function stripFilename(path3) {
+  if (!path3)
     return "";
-  const index = path2.lastIndexOf("/");
-  return path2.slice(0, index + 1);
+  const index = path3.lastIndexOf("/");
+  return path3.slice(0, index + 1);
 }
 function resolver(mapUrl, sourceRoot) {
   const from = stripFilename(mapUrl);
@@ -32514,12 +32584,12 @@ function cache_to_json(cache) {
     props: map_to_object(cache.props)
   };
 }
-function log_input(files, options, fs2, debug_folder) {
-  if (!(fs2 && fs2.writeFileSync && fs2.mkdirSync)) {
+function log_input(files, options, fs3, debug_folder) {
+  if (!(fs3 && fs3.writeFileSync && fs3.mkdirSync)) {
     return;
   }
   try {
-    fs2.mkdirSync(debug_folder);
+    fs3.mkdirSync(debug_folder);
   } catch (e) {
     if (e.code !== "EEXIST")
       throw e;
@@ -32544,7 +32614,7 @@ function log_input(files, options, fs2, debug_folder) {
       return file;
     }
   };
-  fs2.writeFileSync(log_path, "Options: \n" + options_str + "\n\nInput files:\n\n" + files_str(files) + "\n");
+  fs3.writeFileSync(log_path, "Options: \n" + options_str + "\n\nInput files:\n\n" + files_str(files) + "\n");
 }
 function* minify_sync_or_async(files, options, _fs_module) {
   if (_fs_module && typeof process === "object" && process.env && typeof process.env.TERSER_DEBUG_DIR === "string") {
@@ -32820,7 +32890,7 @@ async function minify(files, options, _fs_module) {
 // src/core/cleaner.ts
 var Parser3 = require_tree_sitter();
 function getProtectedRanges(node) {
-  let ranges = [];
+  const ranges = [];
   function traverse(n) {
     if (n.type.includes("comment")) {
       ranges.push({ start: n.startIndex, end: n.endIndex, type: "comment" });
@@ -32830,104 +32900,287 @@ function getProtectedRanges(node) {
       ranges.push({ start: n.startIndex, end: n.endIndex, type: "protect" });
       return;
     }
-    for (let i = 0; i < n.childCount; i++)
-      traverse(n.child(i));
+    for (let i = 0; i < n.childCount; i++) {
+      const child = n.child(i);
+      if (child)
+        traverse(child);
+    }
   }
   traverse(node);
   return ranges.sort((a, b) => a.start - b.start);
 }
-function applyWhitespaceCompression(code, isWhitespaceDependent, disableOperatorTightening, options) {
+function applyWhitespaceCompression(code, isWhitespaceDependent, disableOperatorTightening, options, languageId) {
   if (options.profile === "Format") {
     return code;
   }
   if (!isWhitespaceDependent && options.removeIndentation) {
     code = code.replace(/^[ \t]+/gm, "");
   }
-  code = code.replace(/[ \t]+$/gm, "");
-  code = code.replace(/(?<=\S)[ \t]{2,}/g, " ");
+  code = code.replace(/(?<=\S)[ \t]{2,}(?=\S)/g, " ");
   if (!disableOperatorTightening && options.removeSpacesAroundOperators) {
-    const operators = ["\\+=", "-=", "\\*=", "/=", "===", "!==", "==", "!=", "<=", ">=", "&&", "\\|\\|", "\\+", "-", "\\*", "/", "=", "<", ">"];
-    const opsPattern = operators.join("|");
-    const opRegex = new RegExp(`(?<=\\S)[ \\t]*(${opsPattern})[ \\t]*(?=\\S)`, "g");
-    code = code.replace(opRegex, "$1");
+    const mathExprs = [];
+    const isCssLike = languageId && ["css", "scss", "less"].includes(languageId);
+    if (isCssLike) {
+      code = code.replace(/(calc|min|max|clamp)\((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*\)/gi, (match) => {
+        mathExprs.push(match);
+        return `__CSS_MATH_${mathExprs.length - 1}__`;
+      });
+    }
+    const multiCharOps = ["===", "!==", "\\+=", "-=", "\\*=", "/=", "==", "!=", "<=", ">=", "&&", "\\|\\|"];
+    const multiRegex = new RegExp(`(?<=\\S)[ \\t]*(${multiCharOps.join("|")})[ \\t]*(?=\\S)`, "g");
+    code = code.replace(multiRegex, "$1");
+    code = code.replace(/(?<=[a-zA-Z0-9_$\]\)])[ \t]*([=+\-*\/<>])[ \t]*(?=[a-zA-Z0-9_$[({])/g, (match, op, offset, fullStr) => {
+      const nextChar = fullStr[offset + match.length];
+      if (op === "/" && (nextChar === "*" || nextChar === "/"))
+        return match;
+      if (op === "-" && nextChar === "-")
+        return match;
+      if (op === "+" && nextChar === "+")
+        return match;
+      return op;
+    });
+    if (isCssLike && mathExprs.length > 0) {
+      code = code.replace(/__CSS_MATH_(\d+)__/g, (_, idx) => mathExprs[parseInt(idx, 10)]);
+    }
   }
   return code;
 }
-async function processCode(text, languageId, options) {
+async function processCode(text, languageId, options, isFragment = false) {
   const effectiveOptions = { ...options };
   if (languageId === "json" || languageId === "jsonc") {
-    effectiveOptions.profile = "Format";
+    if (effectiveOptions.profile === "Minify") {
+      try {
+        return JSON.stringify(JSON.parse(text));
+      } catch {
+      }
+    } else if (effectiveOptions.profile === "Format") {
+      try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+      } catch {
+        return text;
+      }
+    }
   }
-  const isJsTs = ["javascript", "typescript", "javascriptreact", "typescriptreact"].includes(languageId);
-  if (isJsTs && (effectiveOptions.profile === "Minify" || effectiveOptions.profile === "Obfuscate")) {
+  const isPureJs = languageId === "javascript";
+  if (isPureJs && (effectiveOptions.profile === "Minify" || effectiveOptions.profile === "Obfuscate") && !isFragment) {
     try {
-      const result2 = await minify(text, {
-        mangle: effectiveOptions.profile === "Obfuscate",
+      const isObfuscate = effectiveOptions.profile === "Obfuscate";
+      const result = await minify(text, {
+        mangle: isObfuscate ? { toplevel: true } : false,
         compress: {
           defaults: true,
-          drop_console: effectiveOptions.profile === "Obfuscate"
+          drop_console: isObfuscate
         },
         format: {
           comments: !effectiveOptions.removeComments
         }
       });
-      if (result2.code)
-        return result2.code;
+      if (result.code)
+        return result.code;
     } catch (e) {
       console.warn("Terser failed, falling back to AST cleaning", e);
     }
   }
   const isWhitespaceDependent = ["python", "yaml", "fsharp", "haskell", "jade", "pug", "slim", "stylus", "sass"].includes(languageId);
-  const disableOperatorTightening = ["shellscript", "bash", "sh", "yaml", "powershell", "makefile"].includes(languageId);
+  const disableOperatorTightening = ["shellscript", "bash", "sh", "yaml", "powershell", "makefile", "sql"].includes(languageId);
   const p = await getParserForLanguage(languageId);
   if (!p) {
     return processCodeLegacy(text, languageId, effectiveOptions);
   }
-  const tree = p.parse(text);
-  const originalErrors = countErrors(tree.rootNode);
-  const ranges = getProtectedRanges(tree.rootNode);
-  let result = "";
-  let lastIndex = 0;
-  for (const range of ranges) {
-    if (range.start > lastIndex) {
-      let codePart = text.substring(lastIndex, range.start);
-      result += applyWhitespaceCompression(codePart, isWhitespaceDependent, disableOperatorTightening, effectiveOptions);
-    }
-    if (range.type === "comment") {
-      if (!effectiveOptions.removeComments || effectiveOptions.profile === "Format")
+  let tree = null;
+  let cleanedTree = null;
+  try {
+    tree = p.parse(text);
+    const originalErrors = countErrors(tree.rootNode);
+    const ranges = getProtectedRanges(tree.rootNode);
+    let result = "";
+    let lastIndex = 0;
+    for (const range of ranges) {
+      if (range.start > lastIndex) {
+        const codePart = text.substring(lastIndex, range.start);
+        let compressed = applyWhitespaceCompression(codePart, isWhitespaceDependent, disableOperatorTightening, effectiveOptions, languageId);
+        const endsWithWord = /[a-zA-Z0-9_$]$/.test(codePart.trimEnd());
+        const rangeStartsWord = /^[a-zA-Z0-9_$"'`]/.test(text.substring(range.start, range.end));
+        if (endsWithWord && rangeStartsWord && !compressed.endsWith(" ")) {
+          compressed = compressed.trimEnd() + " ";
+        }
+        result += compressed;
+      }
+      if (range.type === "comment") {
+        const commentText = text.substring(range.start, range.end);
+        if (shouldPreserveComment(commentText, effectiveOptions)) {
+          result += commentText;
+        } else {
+          const prevChar = text[range.start - 1] || "";
+          const nextChar = text[range.end] || "";
+          if (/[a-zA-Z0-9_$]/.test(prevChar) && /[a-zA-Z0-9_$]/.test(nextChar)) {
+            result += " ";
+          }
+        }
+      } else if (range.type === "protect") {
         result += text.substring(range.start, range.end);
-    } else if (range.type === "protect") {
-      result += text.substring(range.start, range.end);
+      }
+      lastIndex = range.end;
     }
-    lastIndex = range.end;
+    if (lastIndex < text.length) {
+      const codePart = text.substring(lastIndex);
+      result += applyWhitespaceCompression(codePart, isWhitespaceDependent, disableOperatorTightening, effectiveOptions, languageId);
+    }
+    if (effectiveOptions.profile !== "Format" && effectiveOptions.removeBlankLines) {
+      result = result.replace(/^[ \t]*(\r?\n)/gm, "");
+    }
+    if (!isFragment) {
+      cleanedTree = p.parse(result);
+      const cleanedErrors = countErrors(cleanedTree.rootNode);
+      if (cleanedErrors > originalErrors) {
+        throw new Error(`Syntax error introduced during cleaning (${originalErrors} -> ${cleanedErrors} errors). Operation aborted to protect your code.`);
+      }
+    }
+    return result;
+  } finally {
+    if (tree)
+      tree.delete();
+    if (cleanedTree)
+      cleanedTree.delete();
   }
-  if (lastIndex < text.length) {
-    let codePart = text.substring(lastIndex);
-    result += applyWhitespaceCompression(codePart, isWhitespaceDependent, disableOperatorTightening, effectiveOptions);
-  }
-  if (effectiveOptions.profile !== "Format" && effectiveOptions.removeBlankLines) {
-    result = result.replace(/^[ \t]*(\r?\n)/gm, "");
-  }
-  const cleanedTree = p.parse(result);
-  const cleanedErrors = countErrors(cleanedTree.rootNode);
-  if (cleanedErrors > originalErrors) {
-    throw new Error("Syntax error introduced during cleaning. Operation aborted to protect your code.");
-  }
-  return result;
 }
 
 // src/commands.ts
-async function processTextPreservingWhitespace(textToProcess, languageId, options) {
-  const leadingWhitespace = textToProcess.length === 0 ? "" : (textToProcess.match(/^\s*/) || [""])[0];
-  const isAllWhitespace = leadingWhitespace.length === textToProcess.length;
-  const trailingWhitespace = isAllWhitespace ? "" : (textToProcess.match(/\s*$/) || [""])[0];
-  const trimmedText = isAllWhitespace ? "" : textToProcess.substring(leadingWhitespace.length, textToProcess.length - trailingWhitespace.length);
-  let finalText = textToProcess;
-  if (!isAllWhitespace) {
-    const cleanedText = await processCode(trimmedText, languageId, options);
-    finalText = leadingWhitespace + cleanedText + trailingWhitespace;
+var CleanPreviewProvider = class {
+  constructor() {
+    this.contents = /* @__PURE__ */ new Map();
+    this._onDidChange = new vscode2.EventEmitter();
+    this.onDidChange = this._onDidChange.event;
   }
-  return finalText;
+  static {
+    this.scheme = "codecleaner-preview";
+  }
+  setContent(uri, content) {
+    this.contents.set(uri.toString(), content);
+    this._onDidChange.fire(uri);
+  }
+  provideTextDocumentContent(uri) {
+    return this.contents.get(uri.toString()) || "";
+  }
+};
+var previewProvider = new CleanPreviewProvider();
+var BINARY_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".ico",
+  ".webp",
+  ".pdf",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".wasm",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".ttf",
+  ".woff",
+  ".woff2",
+  ".sqlite",
+  ".db",
+  ".mp4",
+  ".mp3",
+  ".mov",
+  ".avi",
+  ".bin"
+]);
+var IGNORED_NAMES = /* @__PURE__ */ new Set([
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "cargo.lock",
+  "composer.lock"
+]);
+function isCleanableFile(uri) {
+  const ext = path2.extname(uri.fsPath).toLowerCase();
+  const basename2 = path2.basename(uri.fsPath);
+  if (BINARY_EXTENSIONS.has(ext) || IGNORED_NAMES.has(basename2)) {
+    return false;
+  }
+  return true;
+}
+async function processTextPreservingWhitespace(textToProcess, languageId, options, isFragment = false) {
+  if (textToProcess.length === 0 || textToProcess.trim().length === 0) {
+    return textToProcess;
+  }
+  return await processCode(textToProcess, languageId, options, isFragment);
+}
+function getProfileQuickPickItems(currentProfile) {
+  return [
+    {
+      label: `$(symbol-keyword) Format${currentProfile === "Format" ? "  \u2713 (Active)" : ""}`,
+      description: "Safe spacing & indentation",
+      detail: "Standardizes indentation and spacing without removing comments or blank lines. Safest option for formatting.",
+      profile: "Format",
+      picked: currentProfile === "Format"
+    },
+    {
+      label: `$(sparkle) Clean${currentProfile === "Clean" ? "  \u2713 (Active - Default)" : " (Default)"}`,
+      description: "Balanced cleanup",
+      detail: "Removes comments, blank lines, and tightens operator spacing while preserving readable indentation.",
+      profile: "Clean",
+      picked: currentProfile === "Clean"
+    },
+    {
+      label: `$(zap) Minify${currentProfile === "Minify" ? "  \u2713 (Active)" : ""}`,
+      description: "Maximum compression",
+      detail: "Aggressively removes all unnecessary whitespace, empty lines, and indentation for minimal file size.",
+      profile: "Minify",
+      picked: currentProfile === "Minify"
+    },
+    {
+      label: `$(shield) Obfuscate${currentProfile === "Obfuscate" ? "  \u2713 (Active)" : ""}`,
+      description: "Mangle JS variables & drop logs",
+      detail: "Mangles identifier names to single letters and removes console.log statements (JavaScript only).",
+      profile: "Obfuscate",
+      picked: currentProfile === "Obfuscate"
+    }
+  ];
+}
+async function executeCleanOnEditor(editor, customProfile, forceScope) {
+  const document2 = editor.document;
+  const languageId = document2.languageId;
+  const selection = editor.selection;
+  const isFragment = forceScope === "selection" ? true : forceScope === "file" ? false : !selection.isEmpty;
+  let rangeToReplace;
+  let textToProcess;
+  if (isFragment) {
+    rangeToReplace = new vscode2.Range(selection.start, selection.end);
+    textToProcess = document2.getText(rangeToReplace);
+  } else {
+    const firstLine = document2.lineAt(0);
+    const lastLine = document2.lineAt(document2.lineCount - 1);
+    rangeToReplace = new vscode2.Range(firstLine.range.start, lastLine.range.end);
+    textToProcess = document2.getText();
+  }
+  const options = getConfig(document2);
+  if (customProfile) {
+    options.profile = customProfile;
+  }
+  try {
+    const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options, isFragment);
+    if (finalText !== textToProcess) {
+      await editor.edit((editBuilder) => {
+        editBuilder.replace(rangeToReplace, finalText);
+      });
+      vscode2.window.showInformationMessage(
+        isFragment ? `Selection cleaned (${options.profile}).` : `File cleaned (${options.profile}).`
+      );
+    } else {
+      vscode2.window.showInformationMessage(
+        isFragment ? "Selected code is already clean." : "File is already clean."
+      );
+    }
+  } catch (err2) {
+    vscode2.window.showErrorMessage("Failed to apply code cleaner: " + err2.message);
+  }
 }
 function registerCommands(context) {
   let cleanDisposable = vscode2.commands.registerCommand("code-cleaner.cleanCode", async () => {
@@ -32936,32 +33189,41 @@ function registerCommands(context) {
       vscode2.window.showErrorMessage("No active editor found.");
       return;
     }
-    const document2 = editor.document;
-    const languageId = document2.languageId;
-    const selection = editor.selection;
-    let rangeToReplace;
-    let textToProcess;
-    if (!selection.isEmpty) {
-      rangeToReplace = new vscode2.Range(selection.start, selection.end);
-      textToProcess = document2.getText(rangeToReplace);
-    } else {
-      const firstLine = document2.lineAt(0);
-      const lastLine = document2.lineAt(document2.lineCount - 1);
-      rangeToReplace = new vscode2.Range(firstLine.range.start, lastLine.range.end);
-      textToProcess = document2.getText();
+    await executeCleanOnEditor(editor);
+  });
+  let cleanSelectionDisposable = vscode2.commands.registerCommand("code-cleaner.cleanSelection", async () => {
+    const editor = vscode2.window.activeTextEditor;
+    if (!editor) {
+      vscode2.window.showErrorMessage("No active editor found.");
+      return;
     }
-    const options = getConfig();
-    try {
-      const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options);
-      await editor.edit((editBuilder) => {
-        editBuilder.replace(rangeToReplace, finalText);
-      });
-      vscode2.window.showInformationMessage("Code cleaned.");
-    } catch (err2) {
-      vscode2.window.showErrorMessage("Failed to apply code cleaner: " + err2.message);
+    await executeCleanOnEditor(editor, void 0, "selection");
+  });
+  let cleanFileDisposable = vscode2.commands.registerCommand("code-cleaner.cleanFile", async () => {
+    const editor = vscode2.window.activeTextEditor;
+    if (!editor) {
+      vscode2.window.showErrorMessage("No active editor found.");
+      return;
+    }
+    await executeCleanOnEditor(editor, void 0, "file");
+  });
+  let cleanWithProfileDisposable = vscode2.commands.registerCommand("code-cleaner.cleanWithProfile", async () => {
+    const editor = vscode2.window.activeTextEditor;
+    if (!editor) {
+      vscode2.window.showErrorMessage("No active editor found.");
+      return;
+    }
+    const currentProfile = getConfig(editor.document).profile;
+    const isSelection = !editor.selection.isEmpty;
+    const targetLabel = isSelection ? "selection" : "file";
+    const selected = await vscode2.window.showQuickPick(getProfileQuickPickItems(currentProfile), {
+      placeHolder: `Select profile to clean ${targetLabel} (current default: ${currentProfile})`
+    });
+    if (selected) {
+      await executeCleanOnEditor(editor, selected.profile);
     }
   });
-  let copyDisposable = vscode2.commands.registerCommand("code-cleaner.cleanAndCopy", async () => {
+  let previewDisposable = vscode2.commands.registerCommand("code-cleaner.cleanWithPreview", async () => {
     const editor = vscode2.window.activeTextEditor;
     if (!editor) {
       vscode2.window.showErrorMessage("No active editor found.");
@@ -32969,20 +33231,66 @@ function registerCommands(context) {
     }
     const document2 = editor.document;
     const languageId = document2.languageId;
-    const selection = editor.selection;
-    let textToProcess;
-    if (!selection.isEmpty) {
-      textToProcess = document2.getText(new vscode2.Range(selection.start, selection.end));
-    } else {
-      textToProcess = document2.getText();
-    }
-    const options = getConfig();
+    const textToProcess = document2.getText();
+    const options = getConfig(document2);
     try {
-      const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options);
-      await vscode2.env.clipboard.writeText(finalText);
-      vscode2.window.showInformationMessage("Code cleaned and copied.");
+      const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options, false);
+      const previewUri = vscode2.Uri.parse(
+        `${CleanPreviewProvider.scheme}://${path2.basename(document2.fileName)}`
+      );
+      previewProvider.setContent(previewUri, finalText);
+      await vscode2.commands.executeCommand(
+        "vscode.diff",
+        document2.uri,
+        previewUri,
+        `${path2.basename(document2.fileName)} \u2194 Cleaned Preview`
+      );
     } catch (err2) {
-      vscode2.window.showErrorMessage("Failed to clean and copy code: " + err2.message);
+      vscode2.window.showErrorMessage("Failed to generate clean preview: " + err2.message);
+    }
+  });
+  let cleanFileFromExplorerDisposable = vscode2.commands.registerCommand("code-cleaner.cleanFileFromExplorer", async (fileUri) => {
+    const targetUri = fileUri || vscode2.window.activeTextEditor?.document.uri;
+    if (!targetUri) {
+      vscode2.window.showErrorMessage("No file selected.");
+      return;
+    }
+    if (!isCleanableFile(targetUri)) {
+      vscode2.window.showWarningMessage("Selected file is binary or ignored.");
+      return;
+    }
+    try {
+      const document2 = await vscode2.workspace.openTextDocument(targetUri);
+      const options = getConfig(document2);
+      const textToProcess = document2.getText();
+      const finalText = await processTextPreservingWhitespace(textToProcess, document2.languageId, options, false);
+      if (finalText !== textToProcess) {
+        const edit = new vscode2.WorkspaceEdit();
+        const fullRange = new vscode2.Range(
+          document2.lineAt(0).range.start,
+          document2.lineAt(document2.lineCount - 1).range.end
+        );
+        edit.replace(targetUri, fullRange, finalText);
+        const success = await vscode2.workspace.applyEdit(edit);
+        if (success) {
+          await document2.save();
+          vscode2.window.showInformationMessage(`CodeCleaner: ${path2.basename(targetUri.fsPath)} cleaned and saved.`);
+        }
+      } else {
+        vscode2.window.showInformationMessage(`CodeCleaner: ${path2.basename(targetUri.fsPath)} is already clean.`);
+      }
+    } catch (err2) {
+      vscode2.window.showErrorMessage("Failed to clean file: " + err2.message);
+    }
+  });
+  let switchProfileDisposable = vscode2.commands.registerCommand("code-cleaner.switchProfile", async () => {
+    const currentProfile = getConfig().profile;
+    const selected = await vscode2.window.showQuickPick(getProfileQuickPickItems(currentProfile), {
+      placeHolder: `Select default CodeCleaner profile (current: ${currentProfile})`
+    });
+    if (selected) {
+      await vscode2.workspace.getConfiguration("codeCleaner").update("profile", selected.profile, vscode2.ConfigurationTarget.Global);
+      vscode2.window.showInformationMessage(`CodeCleaner: Default profile switched to "${selected.profile}".`);
     }
   });
   let cleanFolderDisposable = vscode2.commands.registerCommand("code-cleaner.cleanFolder", async (folderUri) => {
@@ -32998,54 +33306,74 @@ function registerCommands(context) {
     }, async (progress, token) => {
       try {
         const pattern = new vscode2.RelativePattern(folderUri, "**/*");
-        const excludePattern = new vscode2.RelativePattern(folderUri, "**/{node_modules,.git,dist,build,out,.next,.svelte-kit,.nuxt,coverage,.vscode}/**");
-        const files = await vscode2.workspace.findFiles(pattern, excludePattern);
+        const excludePattern = new vscode2.RelativePattern(
+          folderUri,
+          "**/{node_modules,.git,dist,build,out,.next,.svelte-kit,.nuxt,coverage,.vscode,.idea}/**"
+        );
+        const allFiles = await vscode2.workspace.findFiles(pattern, excludePattern);
+        const files = allFiles.filter(isCleanableFile);
+        if (files.length === 0) {
+          vscode2.window.showInformationMessage("CodeCleaner: No eligible text files to clean.");
+          return;
+        }
         let processedCount = 0;
+        let modifiedCount = 0;
         let errorCount = 0;
         let currentIndex = 0;
-        const concurrencyLimit = 10;
+        const concurrencyLimit = 4;
         const processNext = async () => {
-          if (token.isCancellationRequested)
-            return;
-          const i = currentIndex++;
-          if (i >= files.length)
-            return;
-          const fileUri = files[i];
-          try {
-            const document2 = await vscode2.workspace.openTextDocument(fileUri);
-            const languageId = document2.languageId;
-            const textToProcess = document2.getText();
-            const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options);
-            if (finalText !== textToProcess) {
-              const edit = new vscode2.WorkspaceEdit();
-              const fullRange = new vscode2.Range(
-                document2.lineAt(0).range.start,
-                document2.lineAt(document2.lineCount - 1).range.end
-              );
-              edit.replace(fileUri, fullRange, finalText);
-              const success = await vscode2.workspace.applyEdit(edit);
-              if (success) {
-                await document2.save();
+          while (currentIndex < files.length) {
+            if (token.isCancellationRequested)
+              break;
+            const fileUri = files[currentIndex++];
+            try {
+              const document2 = await vscode2.workspace.openTextDocument(fileUri);
+              const languageId = document2.languageId;
+              const textToProcess = document2.getText();
+              const finalText = await processTextPreservingWhitespace(textToProcess, languageId, options, false);
+              if (finalText !== textToProcess) {
+                const edit = new vscode2.WorkspaceEdit();
+                const fullRange = new vscode2.Range(
+                  document2.lineAt(0).range.start,
+                  document2.lineAt(document2.lineCount - 1).range.end
+                );
+                edit.replace(fileUri, fullRange, finalText);
+                const success = await vscode2.workspace.applyEdit(edit);
+                if (success) {
+                  await document2.save();
+                  modifiedCount++;
+                }
               }
+              processedCount++;
+            } catch (err2) {
+              errorCount++;
+              console.warn(`CodeCleaner: Failed to clean ${fileUri.fsPath}`, err2);
             }
-            processedCount++;
-          } catch (err2) {
-            errorCount++;
-            console.warn(`CodeCleaner: Failed to clean ${fileUri.fsPath}`, err2);
+            progress.report({
+              increment: 1 / files.length * 100,
+              message: `Processed ${processedCount}/${files.length} (${modifiedCount} modified)`
+            });
           }
-          progress.report({ increment: 100 / files.length, message: `Processed ${processedCount}/${files.length} files` });
-          return processNext();
         };
         const workers = Array.from({ length: Math.min(concurrencyLimit, files.length) }, () => processNext());
         await Promise.all(workers);
-        vscode2.window.showInformationMessage(`CodeCleaner: Finished cleaning folder. Processed: ${processedCount}, Errors/Skipped: ${errorCount}`);
+        if (!token.isCancellationRequested) {
+          vscode2.window.showInformationMessage(
+            `CodeCleaner: Finished cleaning folder. Checked: ${processedCount}, Modified: ${modifiedCount}, Errors/Skipped: ${errorCount}`
+          );
+        }
       } catch (err2) {
         vscode2.window.showErrorMessage("Failed to clean folder: " + err2.message);
       }
     });
   });
   context.subscriptions.push(cleanDisposable);
-  context.subscriptions.push(copyDisposable);
+  context.subscriptions.push(cleanSelectionDisposable);
+  context.subscriptions.push(cleanFileDisposable);
+  context.subscriptions.push(cleanWithProfileDisposable);
+  context.subscriptions.push(previewDisposable);
+  context.subscriptions.push(cleanFileFromExplorerDisposable);
+  context.subscriptions.push(switchProfileDisposable);
   context.subscriptions.push(cleanFolderDisposable);
 }
 
@@ -33053,16 +33381,95 @@ function registerCommands(context) {
 function activate(context) {
   registerCommands(context);
   context.subscriptions.push(
+    vscode3.workspace.registerTextDocumentContentProvider(CleanPreviewProvider.scheme, previewProvider)
+  );
+  const formattingProvider = vscode3.languages.registerDocumentFormattingEditProvider(
+    { scheme: "file" },
+    {
+      async provideDocumentFormattingEdits(document2) {
+        const options = getConfig(document2);
+        const text = document2.getText();
+        try {
+          const cleaned = await processCode(text, document2.languageId, options, false);
+          if (cleaned !== text) {
+            const fullRange = new vscode3.Range(
+              document2.lineAt(0).range.start,
+              document2.lineAt(document2.lineCount - 1).range.end
+            );
+            return [vscode3.TextEdit.replace(fullRange, cleaned)];
+          }
+        } catch (e) {
+          console.warn(`CodeCleaner: Formatting failed for ${document2.fileName}: ${e.message}`);
+        }
+        return [];
+      }
+    }
+  );
+  const rangeFormattingProvider = vscode3.languages.registerDocumentRangeFormattingEditProvider(
+    { scheme: "file" },
+    {
+      async provideDocumentRangeFormattingEdits(document2, range) {
+        const options = getConfig(document2);
+        const text = document2.getText(range);
+        try {
+          const cleaned = await processCode(text, document2.languageId, options, true);
+          if (cleaned !== text) {
+            return [vscode3.TextEdit.replace(range, cleaned)];
+          }
+        } catch (e) {
+          console.warn(`CodeCleaner: Range formatting failed for ${document2.fileName}: ${e.message}`);
+        }
+        return [];
+      }
+    }
+  );
+  context.subscriptions.push(formattingProvider, rangeFormattingProvider);
+  const statusBarItem = vscode3.window.createStatusBarItem(vscode3.StatusBarAlignment.Right, 100);
+  statusBarItem.command = "code-cleaner.switchProfile";
+  const profileSummaries = {
+    Format: "Safe spacing & indentation (preserves comments & blank lines)",
+    Clean: "Balanced cleanup (removes comments & blank lines, tightens operators)",
+    Minify: "Maximum compression (strips non-essential whitespace & empty lines)",
+    Obfuscate: "Mangles JS variables & removes console.log statements"
+  };
+  function updateStatusBar() {
+    const profile = getConfig().profile;
+    statusBarItem.text = `$(sparkle) Clean: ${profile}`;
+    const summary = profileSummaries[profile] || profile;
+    const tooltip = new vscode3.MarkdownString(
+      `**CodeCleaner** (Default: **${profile}**)
+
+${summary}
+
+---
+
+*Click to switch default profile*`
+    );
+    statusBarItem.tooltip = tooltip;
+    statusBarItem.show();
+  }
+  updateStatusBar();
+  context.subscriptions.push(statusBarItem);
+  context.subscriptions.push(
+    vscode3.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("codeCleaner.profile")) {
+        updateStatusBar();
+      }
+    })
+  );
+  context.subscriptions.push(
     vscode3.workspace.onWillSaveTextDocument((event) => {
-      const options = getConfig();
+      const document2 = event.document;
+      if (document2.uri.scheme !== "file") {
+        return;
+      }
+      const options = getConfig(document2);
       if (options.cleanOnSave) {
-        const document2 = event.document;
         const textToProcess = document2.getText();
         const languageId = document2.languageId;
-        const cleanedTextPromise = processCode(textToProcess, languageId, options);
         event.waitUntil((async () => {
           try {
-            const cleanedText = await cleanedTextPromise;
+            const cleanedText = await processCode(textToProcess, languageId, options, false);
             if (cleanedText !== textToProcess) {
               const fullRange = new vscode3.Range(
                 document2.lineAt(0).range.start,
@@ -33071,7 +33478,7 @@ function activate(context) {
               return [vscode3.TextEdit.replace(fullRange, cleanedText)];
             }
           } catch (e) {
-            vscode3.window.showErrorMessage("Clean on Save aborted: " + e.message);
+            console.warn(`CodeCleaner: Clean on save skipped for ${document2.fileName}: ${e.message}`);
           }
           return [];
         })());

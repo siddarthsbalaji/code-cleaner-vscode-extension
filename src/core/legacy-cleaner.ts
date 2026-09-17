@@ -1,4 +1,5 @@
 import { CleanOptions } from '../config';
+import { shouldPreserveComment } from './comment-utils';
 
 type Token = { type: 'code' | 'string' | 'regex' | 'comment', value: string };
 
@@ -211,13 +212,12 @@ export function processCodeLegacy(text: string, languageId: string, options: Cle
     
     for (const token of tokens) {
         if (token.type === 'comment') {
-            if (options.removeComments && options.profile !== 'Format') {
-                // Remove Comments if not in format mode
-                continue;
-            } else {
+            if (shouldPreserveComment(token.value, options)) {
                 const placeholder = `__PROTECTED_TOKEN_${protectedTokens.length}__`;
                 protectedTokens.push(token.value);
                 result += placeholder;
+                continue;
+            } else {
                 continue;
             }
         }

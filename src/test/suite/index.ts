@@ -12,9 +12,17 @@ export async function run(): Promise<void> {
     const testsRoot = path.resolve(__dirname, '..');
 
     return new Promise((c, e) => {
-        glob('**/**.test.js', { cwd: testsRoot }).then(files => {
-            // Add files to the test suite
-            files.forEach(f => mocha.addFile(path.resolve(testsRoot, f)));
+        glob('**/**.test.js', { cwd: testsRoot }, (err: Error | null, files: string[]) => {
+            if (err) {
+                return e(err);
+            }
+
+            // Add files to the test suite (run suite tests in VS Code test host)
+            files.forEach(f => {
+                if (f.includes('suite')) {
+                    mocha.addFile(path.resolve(testsRoot, f));
+                }
+            });
 
             try {
                 // Run the mocha test
@@ -29,8 +37,6 @@ export async function run(): Promise<void> {
                 console.error(err);
                 e(err);
             }
-        }).catch(err => {
-            e(err);
         });
     });
 }

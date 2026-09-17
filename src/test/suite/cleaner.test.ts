@@ -2,19 +2,17 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { processCode } from '../../core/cleaner';
 import { CleanOptions } from '../../config';
-import Parser = require('web-tree-sitter');
+import { initParserEngine } from '../../core/parser';
 
 suite('Cleaner Test Suite', () => {
     vscode.window.showInformationMessage('Start all tests.');
 
     setup(async () => {
-        await Parser.init();
+        await initParserEngine();
     });
 
     const defaultOptions: CleanOptions = {
         profile: 'Minify',
-        aiProvider: 'Gemini',
-        apiKey: '',
         removeComments: true,
         removeBlankLines: true,
         removeSpacesAroundOperators: true,
